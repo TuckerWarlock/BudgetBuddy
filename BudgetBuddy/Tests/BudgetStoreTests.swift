@@ -251,6 +251,228 @@ final class BudgetStoreTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
+    func testFailedCategoriesDecodeDoesNotReseedOrOverwriteBlob() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        let corruptData = Data("not valid json".utf8)
+        defaults.set(corruptData, forKey: "budget.categories")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: true)
+
+        XCTAssertTrue(store.categories.isEmpty)
+        XCTAssertTrue(store.hasLoadError)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+        XCTAssertEqual(store.loadStatus.transactions, .empty)
+        XCTAssertEqual(defaults.data(forKey: "budget.categories"), corruptData)
+        XCTAssertEqual(defaults.data(forKey: "budget.categories.corrupt"), corruptData)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testLoadErrorFlagReflectsDecodeOutcome() {
+        guard let failingIsolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let failingDefaults = failingIsolatedDefaults.defaults
+        let failingSuiteName = failingIsolatedDefaults.suiteName
+
+        failingDefaults.set(Data("not valid json".utf8), forKey: "budget.transactions")
+        let failingStore = BudgetStore(defaults: failingDefaults, seedIfEmpty: false)
+        XCTAssertTrue(failingStore.hasLoadError)
+        XCTAssertEqual(failingStore.loadStatus.transactions, .failed)
+        XCTAssertEqual(failingStore.loadStatus.categories, .empty)
+        XCTAssertEqual(failingStore.loadStatus.failedDatasets, [.transactions])
+        failingDefaults.removePersistentDomain(forName: failingSuiteName)
+
+        guard let cleanIsolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let cleanDefaults = cleanIsolatedDefaults.defaults
+        let cleanSuiteName = cleanIsolatedDefaults.suiteName
+
+        let cleanStore = BudgetStore(defaults: cleanDefaults, seedIfEmpty: false)
+        XCTAssertFalse(cleanStore.hasLoadError)
+        XCTAssertTrue(cleanStore.loadStatus.failedDatasets.isEmpty)
+        cleanDefaults.removePersistentDomain(forName: cleanSuiteName)
+    }
+
+    func testRecoverCategoriesSucceedsWhenBackupDecodes() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        let recoverableCategories = [BudgetCategory(name: "Food", monthlyLimit: 500)]
+        guard let corruptBackup = try? JSONEncoder().encode(recoverableCategories) else {
+            XCTFail("Could not encode recoverable categories.")
+            return
+        }
+        defaults.set(corruptBackup, forKey: "budget.categories.corrupt")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertTrue(store.hasRecoverableData(for: .categories))
+
+        let result = store.recover(.categories)
+
+        XCTAssertEqual(result, .success)
+        XCTAssertEqual(store.categories, recoverableCategories)
+        XCTAssertEqual(store.loadStatus.categories, .loaded)
+        XCTAssertFalse(store.hasLoadError)
+        XCTAssertFalse(store.hasRecoverableData(for: .categories))
+        XCTAssertNil(defaults.data(forKey: "budget.categories.corrupt"))
+
+        guard let primaryData = defaults.data(forKey: "budget.categories"),
+              let decodedPrimary = try? JSONDecoder().decode([BudgetCategory].self, from: primaryData) else {
+            XCTFail("Expected recovered categories to be persisted to the primary key.")
+            return
+        }
+        XCTAssertEqual(decodedPrimary, recoverableCategories)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testRecoverCategoriesFailsWhenBackupStillUndecodable() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        let corruptData = Data("not valid json".utf8)
+        defaults.set(corruptData, forKey: "budget.categories")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+
+        let result = store.recover(.categories)
+
+        XCTAssertEqual(result, .decodeFailure)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+        XCTAssertTrue(store.hasLoadError)
+        XCTAssertTrue(store.categories.isEmpty)
+        XCTAssertEqual(defaults.data(forKey: "budget.categories.corrupt"), corruptData)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDiscardCorruptCategoriesRemovesBackupAndClearsStatusWithoutRestoring() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+
+        store.discardCorruptData(for: .categories)
+
+        XCTAssertEqual(store.loadStatus.categories, .empty)
+        XCTAssertFalse(store.hasLoadError)
+        XCTAssertTrue(store.categories.isEmpty)
+        XCTAssertNil(defaults.data(forKey: "budget.categories.corrupt"))
+        XCTAssertNil(defaults.data(forKey: "budget.categories"))
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testRecoveringCategoriesDoesNotAffectTransactionsStatus() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+
+        let transaction = BudgetTransaction(title: "Coffee", amount: 5, categoryID: UUID(), date: Date())
+        guard let transactionsData = try? JSONEncoder().encode([transaction]) else {
+            XCTFail("Could not encode transactions.")
+            return
+        }
+        defaults.set(transactionsData, forKey: "budget.transactions")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+        XCTAssertEqual(store.loadStatus.transactions, .loaded)
+        XCTAssertEqual(store.transactions.count, 1)
+
+        let recoverableCategories = [BudgetCategory(name: "Food", monthlyLimit: 300)]
+        guard let recoverableData = try? JSONEncoder().encode(recoverableCategories) else {
+            XCTFail("Could not encode recoverable categories.")
+            return
+        }
+        defaults.set(recoverableData, forKey: "budget.categories.corrupt")
+
+        let result = store.recover(.categories)
+
+        XCTAssertEqual(result, .success)
+        XCTAssertEqual(store.loadStatus.categories, .loaded)
+        XCTAssertEqual(store.loadStatus.transactions, .loaded)
+        XCTAssertEqual(store.transactions.count, 1)
+        XCTAssertEqual(store.transactions.first?.title, "Coffee")
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testResolvedLoadStatusDoesNotReappearOnNextInit() {
+        guard let discardIsolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let discardDefaults = discardIsolatedDefaults.defaults
+        let discardSuiteName = discardIsolatedDefaults.suiteName
+
+        discardDefaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let discardFirstStore = BudgetStore(defaults: discardDefaults, seedIfEmpty: false)
+        XCTAssertTrue(discardFirstStore.hasLoadError)
+        discardFirstStore.discardCorruptData(for: .categories)
+        XCTAssertFalse(discardFirstStore.hasLoadError)
+
+        let discardSecondStore = BudgetStore(defaults: discardDefaults, seedIfEmpty: false)
+        XCTAssertFalse(discardSecondStore.hasLoadError)
+        XCTAssertEqual(discardSecondStore.loadStatus.categories, .empty)
+        discardDefaults.removePersistentDomain(forName: discardSuiteName)
+
+        guard let restoreIsolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let restoreDefaults = restoreIsolatedDefaults.defaults
+        let restoreSuiteName = restoreIsolatedDefaults.suiteName
+
+        restoreDefaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let restoreFirstStore = BudgetStore(defaults: restoreDefaults, seedIfEmpty: false)
+        XCTAssertTrue(restoreFirstStore.hasLoadError)
+
+        guard let recoverableData = try? JSONEncoder().encode([BudgetCategory(name: "Food", monthlyLimit: 400)]) else {
+            XCTFail("Could not encode recoverable categories.")
+            return
+        }
+        restoreDefaults.set(recoverableData, forKey: "budget.categories.corrupt")
+        XCTAssertEqual(restoreFirstStore.recover(.categories), .success)
+        XCTAssertFalse(restoreFirstStore.hasLoadError)
+
+        let restoreSecondStore = BudgetStore(defaults: restoreDefaults, seedIfEmpty: false)
+        XCTAssertFalse(restoreSecondStore.hasLoadError)
+        XCTAssertEqual(restoreSecondStore.categories.map(\.name), ["Food"])
+        restoreDefaults.removePersistentDomain(forName: restoreSuiteName)
+    }
+
     func testTransactionInMonthANotVisibleInDifferentSelectedMonth() {
         guard let isolatedDefaults = makeIsolatedDefaults() else {
             XCTFail("Could not create test UserDefaults suite.")

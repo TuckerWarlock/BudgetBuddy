@@ -46,7 +46,10 @@ struct DashboardView: View {
                 }
 
                 Section("Recent Transactions") {
-                    if store.monthlyTransactions.isEmpty {
+                    if store.categories.isEmpty {
+                        Text("Add a category from the Categories tab to start tracking transactions.")
+                            .foregroundStyle(.secondary)
+                    } else if store.monthlyTransactions.isEmpty {
                         Text("No transactions yet.")
                             .foregroundStyle(.secondary)
                     } else {
@@ -80,6 +83,7 @@ struct DashboardView: View {
                     } label: {
                         Label("Add Transaction", systemImage: "plus")
                     }
+                    .disabled(store.categories.isEmpty)
                 }
             }
             .sheet(isPresented: $showingAddTransaction) {

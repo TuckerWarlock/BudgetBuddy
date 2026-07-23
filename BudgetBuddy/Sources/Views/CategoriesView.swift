@@ -19,10 +19,16 @@ struct CategoriesView: View {
                     .padding(.vertical, 4)
                 }
                 .onDelete { offsets in
-                    guard let firstIndex = offsets.first else {
+                    // This view only ever presents a single-item confirmation dialog
+                    // (no EditButton/multi-select UI exists here), so swipe-to-delete
+                    // should always yield exactly one index. Assert rather than
+                    // silently dropping extra indices if multi-select is added later
+                    // without updating this handler.
+                    guard offsets.count == 1, let singleIndex = offsets.first else {
+                        assertionFailure("Expected single-item deletion.")
                         return
                     }
-                    pendingCategoryDeletion = store.categories[firstIndex]
+                    pendingCategoryDeletion = store.categories[singleIndex]
                 }
             }
             .navigationTitle("Categories")
