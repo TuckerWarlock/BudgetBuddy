@@ -1,0 +1,34 @@
+name: BudgetBuddy
+options:
+  minimumXcodeGenVersion: 2.46.0
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+targets:
+  BudgetBuddy:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: BudgetBuddy/Sources
+    resources:
+      - path: BudgetBuddy/Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.BudgetBuddy
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: 1.0
+        CURRENT_PROJECT_VERSION: 1
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+  BudgetBuddyTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: BudgetBuddy/Tests
+    dependencies:
+      - target: BudgetBuddy
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
