@@ -32,3 +32,14 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+  BudgetBuddyUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: BudgetBuddy/UITests
+    dependencies:
+      - target: BudgetBuddy
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES

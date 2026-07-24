@@ -24,17 +24,26 @@ struct DashboardView: View {
                                 store.selectPreviousMonth()
                             } label: {
                                 Image(systemName: "chevron.left")
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("previousMonthButton")
                             Spacer()
                             Text(selectedMonthLabel)
                                 .font(.headline)
+                                .accessibilityIdentifier("selectedMonthLabel")
                             Spacer()
                             Button {
                                 store.selectNextMonth()
                             } label: {
                                 Image(systemName: "chevron.right")
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
                             }
-                            .disabled(store.isSelectedMonthCurrentMonth)
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("nextMonthButton")
+                            .opacity(store.isSelectedMonthCurrentMonth ? 0.35 : 1)
                         }
                         Text("Budget: \(store.totalLimit.asCurrency)")
                         Text("Spent: \(store.totalSpent.asCurrency)")
