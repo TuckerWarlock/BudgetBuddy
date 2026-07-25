@@ -18,12 +18,21 @@ final class MonthNavigationUITests: XCTestCase {
         XCTAssertTrue(previousButton.exists)
         XCTAssertTrue(nextButton.exists)
 
+        // The forward chevron is never .disabled() (a real .disabled() toggle
+        // in a List row is its own failure mode -- see DashboardView.swift),
+        // so isEnabled is always true here and can't verify anything about the
+        // current-month state. DashboardView also applies .accessibilityHidden
+        // while on the current month so VoiceOver doesn't announce it as
+        // active, but that isn't observable through XCUIElement -- confirmed
+        // empirically that .exists still reports true regardless, since
+        // XCUITest's element tree isn't identical to the tree VoiceOver reads.
+        // That part of the fix needs a manual VoiceOver check, not this test.
+
         previousButton.tap()
 
         let afterPrevious = label.label
         XCTAssertNotEqual(afterPrevious, originalMonth, "Expected label to change after tapping previous.")
 
-        XCTAssertTrue(nextButton.isEnabled, "Next button should be enabled once we've moved off the current month.")
         nextButton.tap()
 
         let afterNext = label.label

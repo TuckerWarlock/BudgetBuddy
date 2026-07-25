@@ -33,6 +33,21 @@ final class BudgetStoreTests: XCTestCase {
         return decimalValue
     }
 
+    /// Combines already-encoded JSON element blobs into a JSON array by raw
+    /// byte concatenation, deliberately never routing them through
+    /// JSONSerialization. Doing so would parse any JSON number into a
+    /// Double-backed NSNumber and corrupt Decimal precision before the array
+    /// even reaches a `.corrupt` key -- exactly the bug in recover(_:) this
+    /// suite exists to catch -- which would invalidate exact-Decimal
+    /// assertions in tests that build a payload this way even after that bug
+    /// is fixed in the production code.
+    private func combineJSONElements(_ elements: [Data]) -> Data {
+        let joined = elements
+            .map { String(data: $0, encoding: .utf8) ?? "" }
+            .joined(separator: ",")
+        return Data("[\(joined)]".utf8)
+    }
+
     func testMonthlyTotalsReflectSavedTransactions() {
         guard let isolatedDefaults = makeIsolatedDefaults() else {
             XCTFail("Could not create test UserDefaults suite.")
@@ -311,15 +326,27 @@ final class BudgetStoreTests: XCTestCase {
         let defaults = isolatedDefaults.defaults
         let suiteName = isolatedDefaults.suiteName
 
+        // Drive the real flow: undecodable bytes in the primary key are what
+        // actually produces .failed (and a backup) in production. Seeding the
+        // .corrupt key directly with the primary key absent would leave
+        // loadStatus.categories at .empty, a state the recovery sheet never
+        // presents for, so this must start from a genuine failed load.
+        let corruptData = Data("not valid json".utf8)
+        defaults.set(corruptData, forKey: "budget.categories")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+        XCTAssertTrue(store.hasRecoverableData(for: .categories))
+
+        // Simulate the one scenario recover(_:) exists for: the backup itself
+        // is (or has become) readable, e.g. a later app version can decode a
+        // payload an earlier one could not.
         let recoverableCategories = [BudgetCategory(name: "Food", monthlyLimit: 500)]
-        guard let corruptBackup = try? JSONEncoder().encode(recoverableCategories) else {
+        guard let recoverableData = try? JSONEncoder().encode(recoverableCategories) else {
             XCTFail("Could not encode recoverable categories.")
             return
         }
-        defaults.set(corruptBackup, forKey: "budget.categories.corrupt")
-
-        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
-        XCTAssertTrue(store.hasRecoverableData(for: .categories))
+        defaults.set(recoverableData, forKey: "budget.categories.corrupt")
 
         let result = store.recover(.categories)
 
@@ -336,6 +363,412 @@ final class BudgetStoreTests: XCTestCase {
             return
         }
         XCTAssertEqual(decodedPrimary, recoverableCategories)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testRecoverTransactionsReturnsPartialAndPreservesExactDecimalValues() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.transactions")
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.transactions, .failed)
+
+        // 0.07 is one of the exact values a JSONSerialization round-trip is
+        // documented to corrupt (-> 0.070000000000000007) if recovery ever
+        // routes a decoded number through Double/NSNumber instead of staying
+        // in JSONDecoder end to end. An integer amount would round-trip
+        // exactly and hide precisely this bug -- which is how it slipped
+        // through before. readableData below is used as-is (never passed
+        // through JSONSerialization) so this test can't corrupt its own
+        // expected value; only the broken entry (which fails to decode
+        // regardless of numeric precision) is built via JSONSerialization.
+        let readableTransaction = BudgetTransaction(title: "Bus", amount: decimal("0.07"), categoryID: UUID(), date: Date())
+        let encoder = JSONEncoder()
+        guard let readableData = try? encoder.encode(readableTransaction),
+              let brokenSource = try? encoder.encode(readableTransaction),
+              var brokenObject = try? JSONSerialization.jsonObject(with: brokenSource) as? [String: Any] else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        brokenObject.removeValue(forKey: "title")
+        guard let brokenData = try? JSONSerialization.data(withJSONObject: brokenObject) else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+
+        defaults.set(combineJSONElements([brokenData, readableData]), forKey: "budget.transactions.corrupt")
+
+        let result = store.recover(.transactions)
+
+        XCTAssertEqual(result, .partial(recovered: 1, total: 2))
+        XCTAssertEqual(store.transactions.count, 1)
+        XCTAssertEqual(store.transactions.first?.title, "Bus")
+        XCTAssertEqual(
+            store.transactions.first?.amount,
+            decimal("0.07"),
+            "Decimal amount must survive recovery exactly, not round-trip through Double."
+        )
+
+        // The dropped entry exists nowhere else, so the backup must be
+        // retained (not deleted) until the user explicitly resolves it.
+        XCTAssertEqual(store.loadStatus.transactions, .partiallyRecovered(recovered: 1, total: 2))
+        XCTAssertTrue(store.hasRecoverableData(for: .transactions))
+        XCTAssertTrue(store.needsRecoveryAttention)
+        XCTAssertFalse(store.hasLoadError, "A partial recovery loaded something real; it isn't a load error.")
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testRecoverCategoriesReturnsPartialAndPreservesExactDecimalValues() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+
+        // 1800.10 is a representative non-integer money value and one of the exact
+        // values a JSONSerialization round-trip is documented to corrupt
+        // (-> 1800.0999999999999). Same construction discipline as the
+        // transactions version above: readableData is never passed through
+        // JSONSerialization.
+        let readableCategory = BudgetCategory(name: "Housing", monthlyLimit: decimal("1800.10"))
+        let encoder = JSONEncoder()
+        guard let readableData = try? encoder.encode(readableCategory),
+              let brokenSource = try? encoder.encode(readableCategory),
+              var brokenObject = try? JSONSerialization.jsonObject(with: brokenSource) as? [String: Any] else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        brokenObject.removeValue(forKey: "name")
+        guard let brokenData = try? JSONSerialization.data(withJSONObject: brokenObject) else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+
+        defaults.set(combineJSONElements([brokenData, readableData]), forKey: "budget.categories.corrupt")
+
+        let result = store.recover(.categories)
+
+        XCTAssertEqual(result, .partial(recovered: 1, total: 2))
+        XCTAssertEqual(store.categories.count, 1)
+        XCTAssertEqual(store.categories.first?.name, "Housing")
+        XCTAssertEqual(
+            store.categories.first?.monthlyLimit,
+            decimal("1800.10"),
+            "Decimal monthlyLimit must survive recovery exactly, not round-trip through Double."
+        )
+        XCTAssertEqual(store.loadStatus.categories, .partiallyRecovered(recovered: 1, total: 2))
+        XCTAssertTrue(store.hasRecoverableData(for: .categories))
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testPartialRecoveryBackupSurvivesRelaunch() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+
+        let readableCategory = BudgetCategory(name: "Housing", monthlyLimit: decimal("1800.10"))
+        let encoder = JSONEncoder()
+        guard let readableData = try? encoder.encode(readableCategory),
+              let brokenSource = try? encoder.encode(readableCategory),
+              var brokenObject = try? JSONSerialization.jsonObject(with: brokenSource) as? [String: Any] else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        brokenObject.removeValue(forKey: "name")
+        guard let brokenData = try? JSONSerialization.data(withJSONObject: brokenObject) else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        defaults.set(combineJSONElements([brokenData, readableData]), forKey: "budget.categories.corrupt")
+
+        XCTAssertEqual(store.recover(.categories), .partial(recovered: 1, total: 2))
+        XCTAssertTrue(store.hasRecoverableData(for: .categories))
+
+        // The critical case: relaunching must NOT let the stale-backup sweep
+        // (clearStaleBackup, run whenever the primary key decodes fine) delete
+        // this backup just because the already-recovered subset now loads
+        // successfully -- the dropped entry still exists nowhere else.
+        let relaunchedStore = BudgetStore(defaults: defaults, seedIfEmpty: false)
+
+        XCTAssertEqual(relaunchedStore.loadStatus.categories, .partiallyRecovered(recovered: 1, total: 2))
+        XCTAssertTrue(relaunchedStore.hasRecoverableData(for: .categories))
+        XCTAssertTrue(relaunchedStore.needsRecoveryAttention)
+        XCTAssertEqual(relaunchedStore.categories.map(\.name), ["Housing"])
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDiscardingPartialRecoveryRemainderKeepsRecoveredCategoriesAndClearsBackup() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+
+        let readableCategory = BudgetCategory(name: "Housing", monthlyLimit: decimal("1800.10"))
+        let encoder = JSONEncoder()
+        guard let readableData = try? encoder.encode(readableCategory),
+              let brokenSource = try? encoder.encode(readableCategory),
+              var brokenObject = try? JSONSerialization.jsonObject(with: brokenSource) as? [String: Any] else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        brokenObject.removeValue(forKey: "name")
+        guard let brokenData = try? JSONSerialization.data(withJSONObject: brokenObject) else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        defaults.set(combineJSONElements([brokenData, readableData]), forKey: "budget.categories.corrupt")
+
+        XCTAssertEqual(store.recover(.categories), .partial(recovered: 1, total: 2))
+
+        // Discarding the remainder of a partial recovery must not reset the
+        // dataset the way a .failed discard does -- the already-recovered
+        // category is the final, correct state, not a fallback to reseed from.
+        store.discardCorruptData(for: .categories)
+
+        XCTAssertEqual(store.categories.map(\.name), ["Housing"])
+        XCTAssertEqual(store.categories.first?.monthlyLimit, decimal("1800.10"))
+        XCTAssertEqual(store.loadStatus.categories, .loaded)
+        XCTAssertFalse(store.hasRecoverableData(for: .categories))
+        XCTAssertFalse(store.needsRecoveryAttention)
+
+        let relaunchedStore = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(relaunchedStore.categories.map(\.name), ["Housing"])
+        XCTAssertEqual(relaunchedStore.loadStatus.categories, .loaded)
+        XCTAssertFalse(relaunchedStore.needsRecoveryAttention)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testNeedsRecoveryAttentionStaysTrueForUnacknowledgedPartialRecovery() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertTrue(store.needsRecoveryAttention)
+
+        let readableCategory = BudgetCategory(name: "Housing", monthlyLimit: decimal("1800.10"))
+        let encoder = JSONEncoder()
+        guard let readableData = try? encoder.encode(readableCategory),
+              let brokenSource = try? encoder.encode(readableCategory),
+              var brokenObject = try? JSONSerialization.jsonObject(with: brokenSource) as? [String: Any] else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        brokenObject.removeValue(forKey: "name")
+        guard let brokenData = try? JSONSerialization.data(withJSONObject: brokenObject) else {
+            XCTFail("Could not build test payload.")
+            return
+        }
+        defaults.set(combineJSONElements([brokenData, readableData]), forKey: "budget.categories.corrupt")
+
+        XCTAssertEqual(store.recover(.categories), .partial(recovered: 1, total: 2))
+
+        // This is the crux of item 3: a partial recovery is not a load error
+        // (hasLoadError correctly goes false, since something usable was
+        // loaded), but the recovery sheet must not dismiss until the user
+        // acknowledges the dropped entries, so a distinct signal has to stay
+        // true even though hasLoadError does not.
+        XCTAssertFalse(store.hasLoadError)
+        XCTAssertTrue(store.needsRecoveryAttention)
+
+        store.discardCorruptData(for: .categories)
+        XCTAssertFalse(store.needsRecoveryAttention)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDiscardingFailedCategoriesDoesNotFabricateTransactionsStatus() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.transactions, .empty)
+
+        store.discardCorruptData(for: .categories)
+
+        // No transactions existed to cascade, so this must not fabricate a
+        // .loaded status or write an empty array to a key that genuinely had
+        // nothing -- .empty and .loaded both mean "usable," but they aren't
+        // the same fact, and nothing here actually changed for transactions.
+        XCTAssertEqual(store.loadStatus.transactions, .empty)
+        XCTAssertNil(defaults.data(forKey: "budget.transactions"))
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testStaleCorruptBackupIsClearedWhenPrimaryKeyDecodesSuccessfully() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        // Primary key holds a valid, decodable payload...
+        let categories = [BudgetCategory(name: "Food", monthlyLimit: 500)]
+        guard let validData = try? JSONEncoder().encode(categories) else {
+            XCTFail("Could not encode categories.")
+            return
+        }
+        defaults.set(validData, forKey: "budget.categories")
+
+        // ...but a stale .corrupt backup is still sitting from an earlier
+        // failure that nothing ever cleaned up, e.g. left behind by an older
+        // app version that could not yet decode this payload.
+        defaults.set(Data("stale corrupt bytes".utf8), forKey: "budget.categories.corrupt")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+
+        XCTAssertEqual(store.loadStatus.categories, .loaded)
+        XCTAssertFalse(store.hasRecoverableData(for: .categories))
+        XCTAssertNil(defaults.data(forKey: "budget.categories.corrupt"))
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testStaleCorruptBackupIsClearedWhenPrimaryKeyIsEmpty() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        // No primary data at all, plus a stale backup nothing ever cleaned up.
+        defaults.set(Data("stale corrupt bytes".utf8), forKey: "budget.categories.corrupt")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+
+        XCTAssertEqual(store.loadStatus.categories, .empty)
+        XCTAssertFalse(store.hasRecoverableData(for: .categories))
+        XCTAssertNil(defaults.data(forKey: "budget.categories.corrupt"))
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDiscardCorruptCategoriesReseedsWhenSeedIfEmptyIsEnabledAndCascadesTransactions() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+
+        let orphanTransaction = BudgetTransaction(title: "Orphan", amount: 10, categoryID: UUID(), date: Date())
+        guard let transactionsData = try? JSONEncoder().encode([orphanTransaction]) else {
+            XCTFail("Could not encode transactions.")
+            return
+        }
+        defaults.set(transactionsData, forKey: "budget.transactions")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: true)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+        XCTAssertEqual(store.transactions.count, 1)
+
+        store.discardCorruptData(for: .categories)
+
+        // Matches what init produces for a fresh install: the four defaults,
+        // and no transactions left pointing at a category that no longer exists.
+        XCTAssertEqual(store.categories.map(\.name).sorted(), ["Food", "Fun", "Housing", "Transport"])
+        XCTAssertTrue(store.transactions.isEmpty)
+        XCTAssertFalse(store.hasLoadError)
+
+        // State immediately after discard must equal state after a fresh init
+        // over the same (now-updated) defaults -- no relaunch required to
+        // reach a usable state.
+        let relaunchedStore = BudgetStore(defaults: defaults, seedIfEmpty: true)
+        XCTAssertEqual(relaunchedStore.categories.map(\.name).sorted(), store.categories.map(\.name).sorted())
+        XCTAssertEqual(relaunchedStore.transactions.count, store.transactions.count)
+        XCTAssertEqual(relaunchedStore.loadStatus, store.loadStatus)
+        XCTAssertFalse(relaunchedStore.hasLoadError)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDiscardCorruptCategoriesMatchesFreshInitWhenSeedIfEmptyIsDisabled() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        store.discardCorruptData(for: .categories)
+
+        XCTAssertTrue(store.categories.isEmpty)
+        XCTAssertEqual(store.loadStatus.categories, .empty)
+
+        let relaunchedStore = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertTrue(relaunchedStore.categories.isEmpty)
+        XCTAssertEqual(relaunchedStore.loadStatus, store.loadStatus)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDiscardingCategoriesDoesNotClobberIndependentlyFailedTransactionsBackup() {
+        guard let isolatedDefaults = makeIsolatedDefaults() else {
+            XCTFail("Could not create test UserDefaults suite.")
+            return
+        }
+        let defaults = isolatedDefaults.defaults
+        let suiteName = isolatedDefaults.suiteName
+
+        defaults.set(Data("not valid json".utf8), forKey: "budget.categories")
+        let corruptTransactionsData = Data("also not valid json".utf8)
+        defaults.set(corruptTransactionsData, forKey: "budget.transactions")
+
+        let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
+        XCTAssertEqual(store.loadStatus.categories, .failed)
+        XCTAssertEqual(store.loadStatus.transactions, .failed)
+
+        store.discardCorruptData(for: .categories)
+
+        // Discarding categories must not touch the independently failed
+        // transactions dataset -- its backup and primary bytes are untouched,
+        // left for its own recover(_:)/discardCorruptData(for:) call.
+        XCTAssertEqual(store.loadStatus.transactions, .failed)
+        XCTAssertEqual(defaults.data(forKey: "budget.transactions"), corruptTransactionsData)
+        XCTAssertEqual(defaults.data(forKey: "budget.transactions.corrupt"), corruptTransactionsData)
 
         defaults.removePersistentDomain(forName: suiteName)
     }

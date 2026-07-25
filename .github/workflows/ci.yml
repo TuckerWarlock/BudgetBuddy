@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit Tests (required)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install XcodeGen
+        # Runner images ship an older xcodegen pre-installed (e.g. 2.45.4),
+        # so a plain `brew install` is a no-op and leaves that version in
+        # place -- too old for this project's `minimumXcodeGenVersion:
+        # 2.46.0` gate. `brew upgrade` alone isn't enough either: the
+        # runner's local tap index can be stale enough that brew doesn't yet
+        # know a newer xcodegen exists, so `brew update` has to refresh it
+        # first (confirmed -- upgrade alone left 2.45.4 in place).
+        run: |
+          brew update
+          brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Boot simulator
+        # Letting xcodebuild cold-boot a fresh simulator itself, while also
+        # building/installing/launching the app on it in the same step, is a
+        # common source of "Timed out while launching application via Xcode"
+        # failures on CI runners. Booting it here first and blocking on
+        # bootstatus until it's fully up gives the actual test run a warm
+        # simulator instead of a race.
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '.devices | to_entries[] | .value[] | select(.name=="iPhone 17") | .udid' | head -1)
+          if [ -z "$UDID" ]; then
+            echo "::error::No available iPhone 17 simulator found."
+            exit 1
+          fi
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
+          echo "Booting simulator $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID"
+
+      - name: Run unit tests
+        run: |
+          xcodebuild test \
+            -project BudgetBuddy.xcodeproj \
+            -scheme BudgetBuddy \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -only-testing:BudgetBuddyTests
+
+  # UI tests are intentionally non-blocking (continue-on-error below).
+  # XCUITest drives controls through the accessibility tree, and that tree
+  # stays valid even when a SwiftUI List row's own selection gesture is
+  # silently swallowing the real touch before a control ever sees it -- the
+  # exact bug this project has hit twice (the Dashboard month chevrons, then
+  # the data-recovery sheet's Restore/Discard buttons), both only fixed with
+  # .buttonStyle(.plain). A green run here shows a control is reachable and
+  # wired to the right logic; it is not evidence that control responds to a
+  # real tap. Any new tappable control added inside a List/Form row still
+  # needs a manual tap check in the simulator (see DataRecoveryView.swift's
+  # doc comment) -- CI passing here does not clear that.
+  ui-tests:
+    name: UI Tests (non-blocking)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install XcodeGen
+        # Runner images ship an older xcodegen pre-installed (e.g. 2.45.4),
+        # so a plain `brew install` is a no-op and leaves that version in
+        # place -- too old for this project's `minimumXcodeGenVersion:
+        # 2.46.0` gate. `brew upgrade` alone isn't enough either: the
+        # runner's local tap index can be stale enough that brew doesn't yet
+        # know a newer xcodegen exists, so `brew update` has to refresh it
+        # first (confirmed -- upgrade alone left 2.45.4 in place).
+        run: |
+          brew update
+          brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Boot simulator
+        # Letting xcodebuild cold-boot a fresh simulator itself, while also
+        # building/installing/launching the app on it in the same step, is a
+        # common source of "Timed out while launching application via Xcode"
+        # failures on CI runners -- this is what caused this job's first
+        # failure here. Booting it first and blocking on bootstatus until
+        # it's fully up gives the actual test run a warm simulator instead of
+        # a race. XCUITest additionally needs the app to actually launch and
+        # respond, not just install, so this job benefits from a warm
+        # simulator even more than the unit-tests job does.
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '.devices | to_entries[] | .value[] | select(.name=="iPhone 17") | .udid' | head -1)
+          if [ -z "$UDID" ]; then
+            echo "::error::No available iPhone 17 simulator found."
+            exit 1
+          fi
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
+          echo "Booting simulator $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID"
+
+      - name: Run UI tests
+        run: |
+          xcodebuild test \
+            -project BudgetBuddy.xcodeproj \
+            -scheme BudgetBuddy \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -only-testing:BudgetBuddyUITests
