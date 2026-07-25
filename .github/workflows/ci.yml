@@ -9,7 +9,7 @@ jobs:
     name: Unit Tests (required)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install XcodeGen
         # Runner images ship an older xcodegen pre-installed (e.g. 2.45.4),

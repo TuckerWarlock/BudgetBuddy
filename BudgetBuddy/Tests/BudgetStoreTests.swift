@@ -437,7 +437,7 @@ final class BudgetStoreTests: XCTestCase {
         let store = BudgetStore(defaults: defaults, seedIfEmpty: false)
         XCTAssertEqual(store.loadStatus.categories, .failed)
 
-        // 1800.10 is the app's own seeded Housing limit and one of the exact
+        // 1800.10 is a representative non-integer money value and one of the exact
         // values a JSONSerialization round-trip is documented to corrupt
         // (-> 1800.0999999999999). Same construction discipline as the
         // transactions version above: readableData is never passed through
