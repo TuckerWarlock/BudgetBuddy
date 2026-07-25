@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit Tests (required)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Run unit tests
+        run: |
+          xcodebuild test \
+            -project BudgetBuddy.xcodeproj \
+            -scheme BudgetBuddy \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -only-testing:BudgetBuddyTests
+
+  # UI tests are intentionally non-blocking (continue-on-error below).
+  # XCUITest drives controls through the accessibility tree, and that tree
+  # stays valid even when a SwiftUI List row's own selection gesture is
+  # silently swallowing the real touch before a control ever sees it -- the
+  # exact bug this project has hit twice (the Dashboard month chevrons, then
+  # the data-recovery sheet's Restore/Discard buttons), both only fixed with
+  # .buttonStyle(.plain). A green run here shows a control is reachable and
+  # wired to the right logic; it is not evidence that control responds to a
+  # real tap. Any new tappable control added inside a List/Form row still
+  # needs a manual tap check in the simulator (see DataRecoveryView.swift's
+  # doc comment) -- CI passing here does not clear that.
+  ui-tests:
+    name: UI Tests (non-blocking)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Run UI tests
+        run: |
+          xcodebuild test \
+            -project BudgetBuddy.xcodeproj \
+            -scheme BudgetBuddy \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -only-testing:BudgetBuddyUITests
