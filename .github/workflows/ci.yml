@@ -15,8 +15,14 @@ jobs:
         # Runner images ship an older xcodegen pre-installed (e.g. 2.45.4),
         # so a plain `brew install` is a no-op and leaves that version in
         # place -- too old for this project's `minimumXcodeGenVersion:
-        # 2.46.0` gate. Upgrade it if present, install it if not.
-        run: brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
+        # 2.46.0` gate. `brew upgrade` alone isn't enough either: the
+        # runner's local tap index can be stale enough that brew doesn't yet
+        # know a newer xcodegen exists, so `brew update` has to refresh it
+        # first (confirmed -- upgrade alone left 2.45.4 in place).
+        run: |
+          brew update
+          brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
+          xcodegen --version
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -51,8 +57,14 @@ jobs:
         # Runner images ship an older xcodegen pre-installed (e.g. 2.45.4),
         # so a plain `brew install` is a no-op and leaves that version in
         # place -- too old for this project's `minimumXcodeGenVersion:
-        # 2.46.0` gate. Upgrade it if present, install it if not.
-        run: brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
+        # 2.46.0` gate. `brew upgrade` alone isn't enough either: the
+        # runner's local tap index can be stale enough that brew doesn't yet
+        # know a newer xcodegen exists, so `brew update` has to refresh it
+        # first (confirmed -- upgrade alone left 2.45.4 in place).
+        run: |
+          brew update
+          brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
+          xcodegen --version
 
       - name: Generate Xcode project
         run: xcodegen generate
