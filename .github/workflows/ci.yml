@@ -27,12 +27,30 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Boot simulator
+        # Letting xcodebuild cold-boot a fresh simulator itself, while also
+        # building/installing/launching the app on it in the same step, is a
+        # common source of "Timed out while launching application via Xcode"
+        # failures on CI runners. Booting it here first and blocking on
+        # bootstatus until it's fully up gives the actual test run a warm
+        # simulator instead of a race.
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '.devices | to_entries[] | .value[] | select(.name=="iPhone 17") | .udid' | head -1)
+          if [ -z "$UDID" ]; then
+            echo "::error::No available iPhone 17 simulator found."
+            exit 1
+          fi
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
+          echo "Booting simulator $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID"
+
       - name: Run unit tests
         run: |
           xcodebuild test \
             -project BudgetBuddy.xcodeproj \
             -scheme BudgetBuddy \
-            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
             -only-testing:BudgetBuddyTests
 
   # UI tests are intentionally non-blocking (continue-on-error below).
@@ -69,10 +87,31 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Boot simulator
+        # Letting xcodebuild cold-boot a fresh simulator itself, while also
+        # building/installing/launching the app on it in the same step, is a
+        # common source of "Timed out while launching application via Xcode"
+        # failures on CI runners -- this is what caused this job's first
+        # failure here. Booting it first and blocking on bootstatus until
+        # it's fully up gives the actual test run a warm simulator instead of
+        # a race. XCUITest additionally needs the app to actually launch and
+        # respond, not just install, so this job benefits from a warm
+        # simulator even more than the unit-tests job does.
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '.devices | to_entries[] | .value[] | select(.name=="iPhone 17") | .udid' | head -1)
+          if [ -z "$UDID" ]; then
+            echo "::error::No available iPhone 17 simulator found."
+            exit 1
+          fi
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
+          echo "Booting simulator $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID"
+
       - name: Run UI tests
         run: |
           xcodebuild test \
             -project BudgetBuddy.xcodeproj \
             -scheme BudgetBuddy \
-            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
             -only-testing:BudgetBuddyUITests
