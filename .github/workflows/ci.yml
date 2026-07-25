@@ -9,10 +9,14 @@ jobs:
     name: Unit Tests (required)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        # Runner images ship an older xcodegen pre-installed (e.g. 2.45.4),
+        # so a plain `brew install` is a no-op and leaves that version in
+        # place -- too old for this project's `minimumXcodeGenVersion:
+        # 2.46.0` gate. Upgrade it if present, install it if not.
+        run: brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -22,7 +26,7 @@ jobs:
           xcodebuild test \
             -project BudgetBuddy.xcodeproj \
             -scheme BudgetBuddy \
-            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
             -only-testing:BudgetBuddyTests
 
   # UI tests are intentionally non-blocking (continue-on-error below).
@@ -41,10 +45,14 @@ jobs:
     runs-on: macos-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        # Runner images ship an older xcodegen pre-installed (e.g. 2.45.4),
+        # so a plain `brew install` is a no-op and leaves that version in
+        # place -- too old for this project's `minimumXcodeGenVersion:
+        # 2.46.0` gate. Upgrade it if present, install it if not.
+        run: brew list xcodegen &>/dev/null && brew upgrade xcodegen || brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -54,5 +62,5 @@ jobs:
           xcodebuild test \
             -project BudgetBuddy.xcodeproj \
             -scheme BudgetBuddy \
-            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
             -only-testing:BudgetBuddyUITests
